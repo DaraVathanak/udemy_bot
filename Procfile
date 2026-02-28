@@ -1,0 +1,1 @@
+worker: python udemy_free_webhook.py
