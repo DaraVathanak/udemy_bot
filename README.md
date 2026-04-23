@@ -1,44 +1,65 @@
-﻿# Udemy Freebies Discord Bot
+﻿# Udemy Free Course Alert Bot 🎓
 
-Recommended deployment: GitHub Actions (free and easy).
+Monitors [udemyfreebies.com](https://www.udemyfreebies.com/) and posts new free Udemy courses to a Discord channel via webhook.
 
-## GitHub Actions deploy
+## Features
 
-1. Push this repository to GitHub.
-2. In your GitHub repo, open `Settings` -> `Secrets and variables` -> `Actions`.
-3. Create secret `DISCORD_WEBHOOK_URL` with your Discord webhook URL.
-4. Open `Settings` -> `Actions` -> `General` -> `Workflow permissions`, and set `Read and write permissions` (required so workflow can commit `data/seen.sqlite3`).
-5. Commit/push this project files (including `.github/workflows/udemy-bot.yml`).
-6. Open `Actions` tab -> select `Udemy Bot` workflow -> click `Run workflow` once.
-7. Confirm logs show successful run and Discord posts.
+- Scrapes free Udemy coupon links every 15 minutes
+- Posts course title, thumbnail, coupon code, and expiry to Discord
+- Deduplicates using PostgreSQL so you never get the same course twice
+- Runs forever as a Render worker (free tier)
 
-The workflow then runs automatically every 15 minutes using:
+---
 
-```yaml
-cron: "*/15 * * * *"
-timezone: "Asia/Phnom_Penh"
-```
+## Deployment (Render + Supabase)
 
-Notes:
-- You can manually run from `Actions` and override `source_url` / `max_details_per_run` inputs.
-- Workflow state is persisted in `data/seen.sqlite3` and auto-committed back to your repo.
+### Step 1 — Get a free PostgreSQL database (Supabase)
 
-## Local run (single cycle)
+1. Go to [supabase.com](https://supabase.com) → **New project** (free tier)
+2. After it's ready: **Settings → Database → Connection string → URI**
+3. Copy the `postgresql://...` connection string
+
+### Step 2 — Get your Discord Webhook URL
+
+1. Open your Discord server → channel settings → **Integrations → Webhooks**
+2. Click **New Webhook** → copy the URL
+
+### Step 3 — Deploy on Render
+
+1. Push this repo to GitHub
+2. Go to [render.com](https://render.com) → **New → Blueprint**
+3. Connect your GitHub repo — Render will detect `render.yaml` automatically
+4. Set these environment variables in the Render dashboard:
+   - `DISCORD_WEBHOOK_URL` → your Discord webhook URL
+   - `DATABASE_URL` → your Supabase connection string
+5. Click **Deploy**
+
+That's it! The bot will start immediately and post any new free courses to your Discord.
+
+---
+
+## Environment Variables
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `DISCORD_WEBHOOK_URL` | ✅ | — | Discord webhook URL |
+| `DATABASE_URL` | ✅ | — | PostgreSQL connection string |
+| `SOURCE_URL` | ❌ | `https://www.udemyfreebies.com/` | Source to scrape |
+| `POLL_SECONDS` | ❌ | `900` | Seconds between checks (min 30) |
+| `MAX_DETAILS_PER_RUN` | ❌ | `40` | Max courses to check per cycle |
+| `RUN_ONCE` | ❌ | `false` | Exit after one cycle (for testing) |
+
+## Local Testing
 
 ```bash
-DISCORD_WEBHOOK_URL=... RUN_ONCE=1 python udemy_free_webhook.py
-```
+pip install -r requirements.txt
 
-On Windows PowerShell:
+export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."
+export DATABASE_URL="postgresql://..."
 
-```powershell
-$env:DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."
-$env:RUN_ONCE="1"
-python .\udemy_free_webhook.py
-```
+# Single run (test mode)
+python udemy_free_webhook.py --once
 
-## Local run (continuous mode)
-
-```bash
-DISCORD_WEBHOOK_URL=... python udemy_free_webhook.py
+# Continuous mode
+python udemy_free_webhook.py
 ```

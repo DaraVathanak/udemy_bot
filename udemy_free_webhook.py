@@ -1,7 +1,6 @@
 ﻿import hashlib
 import os
 import re
-import sqlite3
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -9,6 +8,8 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 from urllib.parse import parse_qs, urljoin, urlparse
 
+import psycopg2
+import psycopg2.extras
 import requests
 from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
@@ -17,9 +18,9 @@ from urllib3.util.retry import Retry
 # ---------------- CONFIG ----------------
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
 SOURCE_URL = os.environ.get("SOURCE_URL", "https://www.udemyfreebies.com/").strip()
-DB_PATH = Path(os.environ.get("DB_PATH", "data/seen.sqlite3")).expanduser()
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 
-USER_AGENT = "UdemyFreeAlertBot/3.0"
+USER_AGENT = "UdemyFreeAlertBot/4.0"
 TIMEOUT = 30
 
 
@@ -29,7 +30,6 @@ def env_int(name: str, default: int, min_value: int = 1) -> int:
         value = int(raw)
     except ValueError as exc:
         raise SystemExit(f"Invalid integer for {name}: {raw!r}") from exc
-
     if value < min_value:
         raise SystemExit(f"{name} must be >= {min_value}, got {value}")
     return value
@@ -48,6 +48,9 @@ MAX_DETAILS_PER_RUN = env_int("MAX_DETAILS_PER_RUN", 40, min_value=1)
 if not WEBHOOK_URL:
     raise SystemExit("Missing DISCORD_WEBHOOK_URL environment variable")
 
+if not DATABASE_URL:
+    raise SystemExit("Missing DATABASE_URL environment variable")
+
 parsed_source = urlparse(SOURCE_URL)
 if not parsed_source.scheme or not parsed_source.netloc:
     raise SystemExit(f"Invalid SOURCE_URL: {SOURCE_URL!r}")
@@ -58,32 +61,44 @@ def log(message: str) -> None:
 
 
 # ---------------- DB ----------------
+def get_conn():
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
+
+
 def init_db() -> None:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(DB_PATH) as con:
-        con.execute(
-            """
-            CREATE TABLE IF NOT EXISTS seen (
-                id TEXT PRIMARY KEY,
-                url TEXT,
-                title TEXT,
-                first_seen_ts INTEGER
-            )
-            """
-        )
+    with get_conn() as con:
+        with con.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS seen (
+                    id TEXT PRIMARY KEY,
+                    url TEXT,
+                    title TEXT,
+                    first_seen_ts BIGINT
+                )
+            """)
+        con.commit()
+    log("Database initialized")
 
 
 def seen(item_id: str) -> bool:
-    with sqlite3.connect(DB_PATH) as con:
-        return con.execute("SELECT 1 FROM seen WHERE id=?", (item_id,)).fetchone() is not None
+    with get_conn() as con:
+        with con.cursor() as cur:
+            cur.execute("SELECT 1 FROM seen WHERE id=%s", (item_id,))
+            return cur.fetchone() is not None
 
 
 def mark_seen(item_id: str, url: str, title: str) -> None:
-    with sqlite3.connect(DB_PATH) as con:
-        con.execute(
-            "INSERT OR IGNORE INTO seen VALUES (?, ?, ?, strftime('%s','now'))",
-            (item_id, url, title),
-        )
+    with get_conn() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO seen (id, url, title, first_seen_ts)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                (item_id, url, title, int(time.time())),
+            )
+        con.commit()
 
 
 # ---------------- HTTP ----------------
@@ -144,7 +159,15 @@ def get_udemy_url(html: str, base: str) -> Optional[str]:
 
     for anchor in soup.select("a[href]"):
         href = urljoin(base, anchor["href"])
-        if "udemy.com" not in href.lower():
+        href_lower = href.lower()
+        anchor_text = anchor.get_text(" ", strip=True).lower()
+
+        is_candidate = (
+            "udemy.com" in href_lower
+            or "/out/" in href_lower
+            or "go to course" in anchor_text
+        )
+        if not is_candidate:
             continue
 
         try:
@@ -152,8 +175,9 @@ def get_udemy_url(html: str, base: str) -> Optional[str]:
         except requests.RequestException:
             continue
 
-        if "udemy.com/course/" in response.url:
-            return response.url
+        resolved = response.url.strip()
+        if "udemy.com/course/" in resolved.lower():
+            return resolved
     return None
 
 
@@ -206,7 +230,9 @@ def send_discord(title: str, url: str, coupon: str, image: str, countdown: str) 
         "title": title,
         "url": url,
         "description": description,
+        "color": 7506394,  # purple
         "footer": {"text": "Udemy Freebies Bot"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
     if image:
@@ -246,6 +272,8 @@ def run() -> None:
             send_discord(title, udemy_url, coupon, image, countdown)
             mark_seen(item_id, udemy_url, title)
             posted += 1
+            log(f"Posted: {title}")
+            time.sleep(1)  # be polite between posts
         except Exception as exc:
             log(f"Error while processing {link}: {exc}")
 
@@ -253,7 +281,7 @@ def run() -> None:
 
 
 def main() -> None:
-    log("Bot started")
+    log("Bot started (continuous mode)")
     init_db()
 
     while True:
@@ -266,6 +294,7 @@ def main() -> None:
         elapsed = int(time.time() - cycle_started)
         sleep_for = max(0, POLL_SECONDS - elapsed)
         if sleep_for:
+            log(f"Sleeping {sleep_for}s until next cycle...")
             time.sleep(sleep_for)
 
 

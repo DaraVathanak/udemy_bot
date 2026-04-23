@@ -1,5 +1,8 @@
 __pycache__/
 *.pyc
-seen.sqlite3
+*.pyo
 .env
-.venv/
+data/
+*.sqlite3
+.idea/
+.vscode/
