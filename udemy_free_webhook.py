@@ -1,138 +1,204 @@
+﻿import hashlib
 import os
 import re
-import time
 import sqlite3
-import hashlib
-from typing import List, Optional, Tuple
-from urllib.parse import urljoin, urlparse, parse_qs
+import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import List, Optional, Tuple
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # ---------------- CONFIG ----------------
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
 SOURCE_URL = os.environ.get("SOURCE_URL", "https://www.udemyfreebies.com/").strip()
-POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "900"))
-DB_PATH = os.environ.get("DB_PATH", "seen.sqlite3")
-MAX_DETAILS_PER_RUN = int(os.environ.get("MAX_DETAILS_PER_RUN", "40"))
+DB_PATH = Path(os.environ.get("DB_PATH", "seen.sqlite3")).expanduser()
 
-USER_AGENT = "UdemyFreeAlertBot/2.0"
+USER_AGENT = "UdemyFreeAlertBot/3.0"
 TIMEOUT = 30
 
+
+def env_int(name: str, default: int, min_value: int = 1) -> int:
+    raw = os.environ.get(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise SystemExit(f"Invalid integer for {name}: {raw!r}") from exc
+
+    if value < min_value:
+        raise SystemExit(f"{name} must be >= {min_value}, got {value}")
+    return value
+
+
+POLL_SECONDS = env_int("POLL_SECONDS", 900, min_value=30)
+MAX_DETAILS_PER_RUN = env_int("MAX_DETAILS_PER_RUN", 40, min_value=1)
+
 if not WEBHOOK_URL:
-    raise SystemExit("❌ Missing DISCORD_WEBHOOK_URL environment variable")
+    raise SystemExit("Missing DISCORD_WEBHOOK_URL environment variable")
+
+parsed_source = urlparse(SOURCE_URL)
+if not parsed_source.scheme or not parsed_source.netloc:
+    raise SystemExit(f"Invalid SOURCE_URL: {SOURCE_URL!r}")
+
+
+def log(message: str) -> None:
+    print(f"{datetime.now(timezone.utc).isoformat()} | {message}", flush=True)
+
 
 # ---------------- DB ----------------
-def init_db():
+def init_db() -> None:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(DB_PATH) as con:
-        con.execute("""
+        con.execute(
+            """
             CREATE TABLE IF NOT EXISTS seen (
                 id TEXT PRIMARY KEY,
                 url TEXT,
                 title TEXT,
                 first_seen_ts INTEGER
             )
-        """)
+            """
+        )
+
 
 def seen(item_id: str) -> bool:
     with sqlite3.connect(DB_PATH) as con:
         return con.execute("SELECT 1 FROM seen WHERE id=?", (item_id,)).fetchone() is not None
 
-def mark_seen(item_id: str, url: str, title: str):
+
+def mark_seen(item_id: str, url: str, title: str) -> None:
     with sqlite3.connect(DB_PATH) as con:
         con.execute(
             "INSERT OR IGNORE INTO seen VALUES (?, ?, ?, strftime('%s','now'))",
-            (item_id, url, title)
+            (item_id, url, title),
         )
 
+
 # ---------------- HTTP ----------------
-session = requests.Session()
-session.headers.update({"User-Agent": USER_AGENT})
+def build_session() -> requests.Session:
+    http_session = requests.Session()
+    http_session.headers.update({"User-Agent": USER_AGENT})
+
+    retry = Retry(
+        total=3,
+        connect=3,
+        read=3,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=frozenset(["GET", "HEAD", "OPTIONS", "POST"]),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    http_session.mount("http://", adapter)
+    http_session.mount("https://", adapter)
+    return http_session
+
+
+session = build_session()
+
 
 def fetch(url: str) -> str:
-    r = session.get(url, timeout=TIMEOUT)
-    r.raise_for_status()
-    return r.text
+    response = session.get(url, timeout=TIMEOUT)
+    response.raise_for_status()
+    return response.text
+
 
 # ---------------- UTIL ----------------
 def stable_id(title: str, url: str) -> str:
-    return hashlib.sha256(f"{title}|{url}".encode()).hexdigest()
+    return hashlib.sha256(f"{title}|{url}".encode("utf-8")).hexdigest()
+
 
 def extract_coupon(url: str) -> str:
     try:
-        return parse_qs(urlparse(url).query).get("couponCode", [""])[0]
-    except:
+        return parse_qs(urlparse(url).query).get("couponCode", [""])[0].strip()
+    except Exception:
         return ""
+
 
 # ---------------- PARSING ----------------
 def parse_home(html: str, base: str) -> List[str]:
     soup = BeautifulSoup(html, "lxml")
-    links = []
+    links: List[str] = []
 
-    for a in soup.select("a[href]"):
-        if "coupon detail" in a.get_text(" ", strip=True).lower():
-            links.append(urljoin(base, a["href"]))
+    for anchor in soup.select("a[href]"):
+        if "coupon detail" in anchor.get_text(" ", strip=True).lower():
+            links.append(urljoin(base, anchor["href"]))
 
     return list(dict.fromkeys(links))
+
 
 def get_udemy_url(html: str, base: str) -> Optional[str]:
     soup = BeautifulSoup(html, "lxml")
 
-    for a in soup.select("a[href]"):
-        href = urljoin(base, a["href"])
-        if "udemy.com" in href:
-            try:
-                r = session.get(href, timeout=TIMEOUT)
-                if "udemy.com/course/" in r.url:
-                    return r.url
-            except:
-                continue
+    for anchor in soup.select("a[href]"):
+        href = urljoin(base, anchor["href"])
+        if "udemy.com" not in href.lower():
+            continue
+
+        try:
+            response = session.get(href, timeout=TIMEOUT, allow_redirects=True)
+        except requests.RequestException:
+            continue
+
+        if "udemy.com/course/" in response.url:
+            return response.url
     return None
 
+
 # ---------------- DETAILS ----------------
-def parse_expiry(text: str):
-    match = re.search(r"(\d+)\s+(day|hour|minute)", text.lower())
+def parse_expiry(text: str) -> Tuple[str, Optional[datetime]]:
+    match = re.search(r"(\d+)\s+(days?|hours?|minutes?)", text.lower())
     if not match:
         return "", None
 
-    n = int(match.group(1))
+    amount = int(match.group(1))
     unit = match.group(2)
-
     now = datetime.now(timezone.utc)
-    delta = timedelta(days=n) if "day" in unit else timedelta(hours=n) if "hour" in unit else timedelta(minutes=n)
+    if "day" in unit:
+        delta = timedelta(days=amount)
+    elif "hour" in unit:
+        delta = timedelta(hours=amount)
+    else:
+        delta = timedelta(minutes=amount)
+
     return match.group(0), now + delta
 
-def get_details(url: str):
+
+def get_details(url: str) -> Tuple[str, str, str]:
     try:
         html = fetch(url)
         soup = BeautifulSoup(html, "lxml")
+    except requests.RequestException as exc:
+        log(f"Failed to fetch Udemy details for {url}: {exc}")
+        return "Udemy Course", "", ""
 
-        title = soup.title.string.strip() if soup.title else "Udemy Course"
+    title = soup.title.get_text(strip=True) if soup.title else "Udemy Course"
 
-        image = ""
-        og = soup.find("meta", property="og:image")
-        if og:
-            image = og.get("content", "")
+    image = ""
+    og = soup.find("meta", attrs={"property": "og:image"})
+    if og:
+        image = og.get("content", "")
 
-        text = soup.get_text(" ", strip=True)
-        countdown, expiry = parse_expiry(text)
+    text = soup.get_text(" ", strip=True)
+    countdown, _expiry = parse_expiry(text)
+    return title, image, countdown
 
-        return title, image, countdown, expiry
-    except:
-        return "Udemy Course", "", "", None
 
 # ---------------- DISCORD ----------------
-def send_discord(title, url, coupon, image, countdown, expiry):
-    desc = f"**Free Course**"
+def send_discord(title: str, url: str, coupon: str, image: str, countdown: str) -> None:
+    description = "**Free Course**"
     if countdown:
-        desc += f"\n⏳ {countdown}"
+        description += f"\nExpires in: {countdown}"
 
     embed = {
         "title": title,
         "url": url,
-        "description": desc,
-        "footer": {"text": "Udemy Freebies Bot"}
+        "description": description,
+        "footer": {"text": "Udemy Freebies Bot"},
     }
 
     if image:
@@ -141,53 +207,59 @@ def send_discord(title, url, coupon, image, countdown, expiry):
     if coupon:
         embed["fields"] = [{"name": "Coupon", "value": f"`{coupon}`", "inline": True}]
 
-    requests.post(WEBHOOK_URL, json={"embeds": [embed]})
+    response = session.post(WEBHOOK_URL, json={"embeds": [embed]}, timeout=TIMEOUT)
+    response.raise_for_status()
+
 
 # ---------------- MAIN ----------------
-def run():
-    base = f"{urlparse(SOURCE_URL).scheme}://{urlparse(SOURCE_URL).netloc}/"
+def run() -> None:
+    base = f"{parsed_source.scheme}://{parsed_source.netloc}/"
     html = fetch(SOURCE_URL)
     detail_links = parse_home(html, base)
 
     posted = 0
+    scanned = 0
 
     for link in detail_links[:MAX_DETAILS_PER_RUN]:
+        scanned += 1
         try:
             detail_html = fetch(link)
             udemy_url = get_udemy_url(detail_html, base)
-
             if not udemy_url:
                 continue
 
             coupon = extract_coupon(udemy_url)
-            title, image, countdown, expiry = get_details(udemy_url)
-
+            title, image, countdown = get_details(udemy_url)
             item_id = stable_id(title, udemy_url + coupon)
 
             if seen(item_id):
                 continue
 
-            send_discord(title, udemy_url, coupon, image, countdown, expiry)
+            send_discord(title, udemy_url, coupon, image, countdown)
             mark_seen(item_id, udemy_url, title)
-
             posted += 1
+        except Exception as exc:
+            log(f"Error while processing {link}: {exc}")
 
-        except Exception as e:
-            print("Error:", e)
+    log(f"Cycle complete: scanned={scanned}, posted={posted}")
 
-    print(f"Posted {posted} new courses")
 
-def main():
-    print("🚀 Bot started")
+def main() -> None:
+    log("Bot started")
     init_db()
 
     while True:
+        cycle_started = time.time()
         try:
             run()
-        except Exception as e:
-            print("Loop error:", e)
+        except Exception as exc:
+            log(f"Loop error: {exc}")
 
-        time.sleep(POLL_SECONDS)
+        elapsed = int(time.time() - cycle_started)
+        sleep_for = max(0, POLL_SECONDS - elapsed)
+        if sleep_for:
+            time.sleep(sleep_for)
+
 
 if __name__ == "__main__":
     main()

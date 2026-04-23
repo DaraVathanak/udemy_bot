@@ -1,0 +1,24 @@
+[Unit]
+Description=Udemy Freebies Discord Webhook Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/udemy-webhook
+EnvironmentFile=/etc/udemy-webhook.env
+ExecStart=/opt/udemy-webhook/.venv/bin/python /opt/udemy-webhook/udemy_free_webhook.py
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/udemy-webhook
+UMask=027
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
