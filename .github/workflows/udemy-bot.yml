@@ -1,0 +1,71 @@
+name: Udemy Bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_url:
+        description: "Source page to scrape"
+        required: false
+        default: "https://www.udemyfreebies.com/"
+      max_details_per_run:
+        description: "How many detail links to scan per run"
+        required: false
+        default: "40"
+  schedule:
+    - cron: "*/15 * * * *"
+      timezone: "Asia/Phnom_Penh"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: udemy-bot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Validate secret
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "Missing required secret: DISCORD_WEBHOOK_URL"
+            exit 1
+          fi
+
+      - name: Ensure state directory exists
+        run: mkdir -p data
+
+      - name: Run bot once
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          SOURCE_URL: ${{ github.event.inputs.source_url || 'https://www.udemyfreebies.com/' }}
+          MAX_DETAILS_PER_RUN: ${{ github.event.inputs.max_details_per_run || '40' }}
+          DB_PATH: data/seen.sqlite3
+          RUN_ONCE: "1"
+        run: python udemy_free_webhook.py
+
+      - name: Commit seen database
+        run: |
+          if [ -z "$(git status --porcelain -- data/seen.sqlite3)" ]; then
+            echo "No seen database changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/seen.sqlite3
+          git commit -m "chore: update seen database [skip ci]"
+          git push

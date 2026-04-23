@@ -2,6 +2,7 @@
 import os
 import re
 import sqlite3
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,7 +17,7 @@ from urllib3.util.retry import Retry
 # ---------------- CONFIG ----------------
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
 SOURCE_URL = os.environ.get("SOURCE_URL", "https://www.udemyfreebies.com/").strip()
-DB_PATH = Path(os.environ.get("DB_PATH", "seen.sqlite3")).expanduser()
+DB_PATH = Path(os.environ.get("DB_PATH", "data/seen.sqlite3")).expanduser()
 
 USER_AGENT = "UdemyFreeAlertBot/3.0"
 TIMEOUT = 30
@@ -32,6 +33,13 @@ def env_int(name: str, default: int, min_value: int = 1) -> int:
     if value < min_value:
         raise SystemExit(f"{name} must be >= {min_value}, got {value}")
     return value
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 POLL_SECONDS = env_int("POLL_SECONDS", 900, min_value=30)
@@ -261,5 +269,19 @@ def main() -> None:
             time.sleep(sleep_for)
 
 
+def run_once() -> int:
+    log("Bot started (single-run mode)")
+    init_db()
+    try:
+        run()
+        return 0
+    except Exception as exc:
+        log(f"Fatal error in single-run mode: {exc}")
+        return 1
+
+
 if __name__ == "__main__":
+    single_run = env_bool("RUN_ONCE", default=False) or "--once" in sys.argv
+    if single_run:
+        raise SystemExit(run_once())
     main()

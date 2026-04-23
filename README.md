@@ -1,56 +1,44 @@
-# Udemy Freebies Discord Bot
+﻿# Udemy Freebies Discord Bot
 
-This project is now prepared for an always-on Linux VM deployment (recommended: Oracle Cloud Always Free VM).
+Recommended deployment: GitHub Actions (free and easy).
 
-## 1) VM prerequisites (Ubuntu)
+## GitHub Actions deploy
 
-```bash
-sudo apt update
-sudo apt install -y git python3 python3-venv
+1. Push this repository to GitHub.
+2. In your GitHub repo, open `Settings` -> `Secrets and variables` -> `Actions`.
+3. Create secret `DISCORD_WEBHOOK_URL` with your Discord webhook URL.
+4. Open `Settings` -> `Actions` -> `General` -> `Workflow permissions`, and set `Read and write permissions` (required so workflow can commit `data/seen.sqlite3`).
+5. Commit/push this project files (including `.github/workflows/udemy-bot.yml`).
+6. Open `Actions` tab -> select `Udemy Bot` workflow -> click `Run workflow` once.
+7. Confirm logs show successful run and Discord posts.
+
+The workflow then runs automatically every 15 minutes using:
+
+```yaml
+cron: "*/15 * * * *"
+timezone: "Asia/Phnom_Penh"
 ```
 
-## 2) Clone and install
+Notes:
+- You can manually run from `Actions` and override `source_url` / `max_details_per_run` inputs.
+- Workflow state is persisted in `data/seen.sqlite3` and auto-committed back to your repo.
+
+## Local run (single cycle)
 
 ```bash
-sudo mkdir -p /opt
-cd /opt
-sudo git clone <your-repo-url> udemy-webhook
-sudo chown -R ubuntu:ubuntu /opt/udemy-webhook
-cd /opt/udemy-webhook
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
+DISCORD_WEBHOOK_URL=... RUN_ONCE=1 python udemy_free_webhook.py
 ```
 
-## 3) Configure environment variables
+On Windows PowerShell:
+
+```powershell
+$env:DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."
+$env:RUN_ONCE="1"
+python .\udemy_free_webhook.py
+```
+
+## Local run (continuous mode)
 
 ```bash
-sudo mkdir -p /var/lib/udemy-webhook
-sudo chown -R ubuntu:ubuntu /var/lib/udemy-webhook
-sudo cp deploy/oci/udemy-webhook.env.example /etc/udemy-webhook.env
-sudo nano /etc/udemy-webhook.env
+DISCORD_WEBHOOK_URL=... python udemy_free_webhook.py
 ```
-
-At minimum, set `DISCORD_WEBHOOK_URL`.
-
-## 4) Install and start systemd service
-
-```bash
-sudo cp deploy/oci/udemy-webhook.service /etc/systemd/system/udemy-webhook.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now udemy-webhook
-```
-
-## 5) Verify
-
-```bash
-sudo systemctl status udemy-webhook
-sudo journalctl -u udemy-webhook -f
-```
-
-## Notes
-
-- The SQLite state is persisted at `/var/lib/udemy-webhook/seen.sqlite3`.
-- The service auto-restarts on failure.
-- Poll interval is controlled by `POLL_SECONDS` in `/etc/udemy-webhook.env`.
